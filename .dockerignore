@@ -1,0 +1,10 @@
+venv/
+__pycache__/
+.env
+*.session
+*.session-journal
+*.log
+*.bak*
+deploy/
+login*.py
+*.pub

@@ -1,0 +1,12 @@
+# Maxfiy fayllar — hech qachon GitHub'ga yuklanmasin
+.env
+*.session
+*.session-journal
+oracle_bot*
+*.pem
+
+# Vaqtinchalik fayllar
+venv/
+__pycache__/
+*.log
+*.bak*

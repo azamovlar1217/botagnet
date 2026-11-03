@@ -1,0 +1,8 @@
+aiogram==3.31.0
+edge-tts==7.3.1
+google-genai==2.34.0
+ntgcalls==3.0.6
+py-tgcalls==3.0.0
+python-dotenv==1.2.4
+Telethon==1.45.0
+tzdata==2026.6
