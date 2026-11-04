@@ -249,7 +249,28 @@ async def run_tool(name: str, args: dict) -> str:
 
 
 # ---------------------------------------------------------------- qo'ng'iroq
+async def ensure_caller():
+    """Qo'ng'iroqchi akkaunt uzilib qolgan bo'lsa, qayta ulaydi."""
+    if caller is None:
+        raise RuntimeError("Qo'ng'iroqlar o'chiq (ENABLE_CALLS=0)")
+    if not caller.is_connected():
+        log.warning("Qo'ng'iroqchi akkaunt uzilgan, qayta ulanmoqda...")
+        await asyncio.wait_for(caller.connect(), timeout=30)
+        log.info("Qo'ng'iroqchi akkaunt qayta ulandi")
+
+
+async def caller_watchdog():
+    """Har 30 soniyada qo'ng'iroqchi akkaunt ulanishini tekshiradi."""
+    while True:
+        await asyncio.sleep(30)
+        try:
+            await ensure_caller()
+        except Exception as e:
+            log.warning("Qayta ulanib bo'lmadi: %s", e)
+
+
 async def resolve(who: str):
+    await ensure_caller()
     target = CONTACTS.get(who, who)  # kontakt nomi yoki to'g'ridan-to'g'ri @username / +raqam
     if target.lstrip("-").isdigit():
         target = int(target)
@@ -576,9 +597,17 @@ async def start_calls():
     from pytgcalls.types import ChatUpdate, Device, Direction, StreamEnded, StreamFrames
     from telethon import TelegramClient
 
-    caller = TelegramClient("caller", int(os.environ["TG_API_ID"]), os.environ["TG_API_HASH"])
+    caller = TelegramClient(
+        "caller",
+        int(os.environ["TG_API_ID"]),
+        os.environ["TG_API_HASH"],
+        connection_retries=-1,  # internet uzilsa ham to'xtamay qayta ulanadi
+        retry_delay=5,
+        auto_reconnect=True,
+    )
     await caller.start()  # birinchi marta telefon raqam va kodni so'raydi
     await caller.get_dialogs()  # kontaktlar ID orqali topilishi uchun keshlash
+    asyncio.create_task(caller_watchdog())
 
     calls = PyTgCalls(caller)
 
