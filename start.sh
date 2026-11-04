@@ -5,7 +5,10 @@ set -e
 DIR=/app
 [ -d /data ] && DIR=/data
 if [ ! -f "$DIR/caller.session" ] && [ -n "$CALLER_SESSION_B64" ]; then
-  echo "$CALLER_SESSION_B64" | base64 -d > "$DIR/caller.session"
+  # gzip bilan siqilgan bo'lsa ochadi, aks holda oddiy base64
+  if ! echo "$CALLER_SESSION_B64" | base64 -d | gunzip -c > "$DIR/caller.session" 2>/dev/null; then
+    echo "$CALLER_SESSION_B64" | base64 -d > "$DIR/caller.session"
+  fi
 fi
 [ "$DIR" != /app ] && ln -sf "$DIR/caller.session" /app/caller.session
 exec python bot.py
