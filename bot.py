@@ -483,7 +483,8 @@ async def cmd_start(m: Message):
 
 @router.message(Command("yangi"), is_owner)
 async def cmd_new(m: Message):
-    owner_history.clear()
+    async with owner_lock:  # javob tayyorlanayotgan bo'lsa, tugashini kutadi
+        owner_history.clear()
     await m.answer("Yangi suhbat boshlandi ✨")
 
 
@@ -511,6 +512,17 @@ async def owner_chat(m: Message):
             except Exception:
                 del owner_history[mark:]  # chala qolgan qadamlarni olib tashlaymiz
                 raise
+    except genai.errors.APIError as e:
+        log.exception("AI xatosi")
+        if e.code == 429:
+            reply = "Gemini bepul limiti tugadi (429). Bir oz kutib, qayta yozing."
+        elif e.code in (500, 503):
+            reply = "Gemini serverlari hozir band. Bir daqiqadan keyin qayta urinib ko'ring."
+        else:
+            reply = f"AI bilan bog'lanishda xato: {e.code}"
+    except (asyncio.TimeoutError, TimeoutError):
+        log.exception("AI xatosi")
+        reply = "Gemini javob bermadi (internet sekin bo'lishi mumkin). Qayta yozing."
     except Exception as e:
         log.exception("AI xatosi")
         reply = f"AI bilan bog'lanishda xato: {e.__class__.__name__}"
@@ -545,12 +557,18 @@ async def owner_voice(m: Message):
             await m.answer("Ovoz eshitilmadi, yana bir bor yuboring 🙏")
             return
         stamp = dt.datetime.now(TZ).strftime("%Y-%m-%d %H:%M")
-        reply = await chat(
-            owner_history,
-            f"[{stamp}] (ovozli xabar) {heard}",
-            OWNER_SYSTEM + "\nBu javob ovoz bilan o'qiladi: qisqa yoz, emoji va belgilar ishlatma.",
-            TOOLS if ENABLE_CALLS else None,
-        )
+        async with owner_lock:  # matnli xabarlar bilan tarix aralashib ketmasin
+            mark = len(owner_history)
+            try:
+                reply = await chat(
+                    owner_history,
+                    f"[{stamp}] (ovozli xabar) {heard}",
+                    OWNER_SYSTEM + "\nBu javob ovoz bilan o'qiladi: qisqa yoz, emoji va belgilar ishlatma.",
+                    TOOLS if ENABLE_CALLS else None,
+                )
+            except Exception:
+                del owner_history[mark:]
+                raise
         await m.answer(f"🎤 <i>{html.escape(heard)}</i>\n\n{html.escape(reply)}", parse_mode="HTML")
         await send_spoken(m.chat.id, reply)
     except Exception as e:
