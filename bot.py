@@ -15,6 +15,7 @@ import html
 import logging
 import os
 import re
+import sys
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher, F, Router
@@ -600,8 +601,14 @@ async def business_reply(m: Message):
 
 # ---------------------------------------------------------------- ishga tushirish
 async def main():
+    global ENABLE_CALLS
     if ENABLE_CALLS:
-        await start_calls()
+        try:
+            await start_calls()
+        except Exception as e:
+            ENABLE_CALLS = False  # bot qo'ng'iroqlarsiz ishlashda davom etadi
+            log.exception("Qo'ng'iroqlar ishga tushmadi")
+            await bot.send_message(OWNER_ID, f"⚠️ Qo'ng'iroqlar o'chirildi: {e}")
     else:
         log.info("Qo'ng'iroqlar o'chiq (ENABLE_CALLS=0)")
     log.info("Agent ishga tushdi")
@@ -623,7 +630,16 @@ async def start_calls():
         retry_delay=5,
         auto_reconnect=True,
     )
-    await caller.start()  # birinchi marta telefon raqam va kodni so'raydi
+    if sys.stdin.isatty():
+        await caller.start()  # birinchi marta telefon raqam va kodni so'raydi
+    else:
+        # Server (Railway): kod kiritib bo'lmaydi, tayyor sessiya bo'lishi shart
+        await caller.connect()
+        if not await caller.is_user_authorized():
+            await caller.disconnect()
+            raise RuntimeError(
+                "caller.session yo'q yoki eskirgan. Railway'da CALLER_SESSION_B64 o'zgaruvchisini qo'ying."
+            )
     await caller.get_dialogs()  # kontaktlar ID orqali topilishi uchun keshlash
     asyncio.create_task(caller_watchdog())
 
