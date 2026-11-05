@@ -11,8 +11,8 @@ WEATHER_CODES = {
 _TIMEOUT = aiohttp.ClientTimeout(total=15)
 
 
-async def _json(url: str, params: dict | None = None):
-    async with aiohttp.ClientSession(timeout=_TIMEOUT) as s:
+async def _json(url: str, params: dict | None = None, timeout: aiohttp.ClientTimeout = _TIMEOUT):
+    async with aiohttp.ClientSession(timeout=timeout) as s:
         async with s.get(url, params=params) as r:
             r.raise_for_status()
             return await r.json(content_type=None)
@@ -47,8 +47,18 @@ async def weather(city: str = "Toshkent") -> str:
 
 
 async def currency(codes: str = "USD,EUR,RUB") -> str:
-    rows = await _json("https://cbu.uz/uz/arkhiv-kursov-valyut/json/")
+    """Avval O'zbekiston Markaziy banki; u javob bermasa (chet eldagi serverdan ochilmasligi mumkin) — zaxira manba."""
     want = {c.strip().upper() for c in codes.split(",") if c.strip()}
-    out = [f"1 {r['Ccy']} = {r['Rate']} so'm ({r['Diff']})" for r in rows if r["Ccy"] in want]
-    date = rows[0]["Date"] if rows else ""
-    return (f"Markaziy bank kursi ({date}):\n" + "\n".join(out)) if out else "Bunday valyuta topilmadi."
+    try:
+        rows = await _json("https://cbu.uz/uz/arkhiv-kursov-valyut/json/", timeout=aiohttp.ClientTimeout(total=6))
+        out = [f"1 {r['Ccy']} = {r['Rate']} so'm ({r['Diff']})" for r in rows if r["Ccy"] in want]
+        if out:
+            return f"Markaziy bank kursi ({rows[0]['Date']}):\n" + "\n".join(out)
+    except Exception:
+        pass
+    data = await _json("https://open.er-api.com/v6/latest/USD")
+    rates = data["rates"]
+    out = [f"1 {c} = {rates['UZS'] / rates[c]:,.2f} so'm".replace(",", " ") for c in sorted(want) if c in rates]
+    if not out:
+        return "Bunday valyuta topilmadi."
+    return f"Valyuta kursi (xalqaro manba, {data.get('time_last_update_utc', '')[:16]}):\n" + "\n".join(out)

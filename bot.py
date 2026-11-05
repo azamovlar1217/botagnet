@@ -122,6 +122,7 @@ business_histories: dict[int, list] = {}
 family_histories: dict[int, list] = {}
 family_locks: dict[int, asyncio.Lock] = {}
 state = {"auto_reply": storage.get("auto_reply", True)}
+model_cooldown: dict[str, float] = {}  # 429 bo'lgan model -> qachongacha chetlab o'tiladi
 no_thinking_models: set[str] = set()  # thinking_level'ni qo'llamaydigan modellar
 
 # ---------------------------------------------------------------- Gemini AI
@@ -153,6 +154,8 @@ Doim ishlaydigan imkoniyatlaring:
 - bozor_holati: onamning haftalik bozor budjeti, xarajatlari, menyu va ro'yxati.
 Javob uslubi: aniq, qisqa, mazmunli. Avval asosiy javob, keyin kerak bo'lsa tafsilot. Markdown belgilari
 (**, ##) ishlatma — Telegramda oddiy matn ko'rinadi. Bilmasang, to'qima, "bilmayman" de.
+Agar funksiya xato qaytarsa, unga bog'liq keyingi ishni (masalan, o'sha ma'lumotni qo'ng'iroqda aytishni)
+bajarma — avval {OWNER_NAME}ga nima bo'lganini ayt va qanday davom etishni so'ra.
 {("Egang haqida: " + OWNER_ABOUT) if OWNER_ABOUT else ""}"""
 
 
@@ -251,7 +254,7 @@ def owner_tools() -> list:
 
 CALL_WORDS = re.compile(r"\b(tel|telefon|qo.?ng.?iroq|qongiroq|zvon|позвони|call)\b", re.IGNORECASE)
 FALLBACK_MODELS = [MODEL] + [
-    m.strip() for m in os.getenv("FALLBACK_MODELS", "gemini-flash-lite-latest").split(",") if m.strip() and m.strip() != MODEL
+    m.strip() for m in os.getenv("FALLBACK_MODELS", "gemini-flash-lite-latest,gemini-3.5-flash").split(",") if m.strip() and m.strip() != MODEL
 ]
 AI_TIMEOUT = int(os.getenv("AI_TIMEOUT", "90"))  # uzun javob (haftalik menyu) uchun yetarli
 
@@ -260,7 +263,10 @@ async def generate(history: list, config, models: list | None = None):
     """Asosiy model band bo'lsa (503/429), zaxira modelga o'tadi."""
     last_err = None
     for attempt in range(3):
-        for model in models or FALLBACK_MODELS:  # band bo'lsa darhol keyingi modelga o'tadi
+        order = models or FALLBACK_MODELS
+        now = asyncio.get_running_loop().time()
+        ready = [m for m in order if model_cooldown.get(m, 0) <= now]
+        for model in ready or order:  # band bo'lsa darhol keyingi modelga o'tadi
             cfg = config
             if THINKING_LEVEL and model not in no_thinking_models and cfg.thinking_config is None:
                 cfg = cfg.model_copy(update={"thinking_config": types.ThinkingConfig(thinking_level=THINKING_LEVEL)})
@@ -279,8 +285,10 @@ async def generate(history: list, config, models: list | None = None):
                     log.info("%s thinking_level'ni qo'llamaydi, o'chirildi", model)
                     no_thinking_models.add(model)
                     return await generate(history, config, [model] + [m for m in (models or FALLBACK_MODELS) if m != model])
-                if e.code not in (429, 500, 503):
+                if e.code not in (404, 429, 500, 503):
                     raise
+                if e.code == 429:  # limit tugagan: bu modelni bir daqiqa chetlab o'tamiz
+                    model_cooldown[model] = asyncio.get_running_loop().time() + 60
                 log.warning("%s band (%s), keyingi model...", model, e.code)
         await asyncio.sleep(3 * (attempt + 1))
     raise last_err
