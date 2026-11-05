@@ -1,5 +1,6 @@
 """Gemini Live orqali real vaqtdagi telefon suhbati (Telegram qo'ng'iroq <-> Gemini)."""
 
+import array
 import asyncio
 import logging
 import os
@@ -20,18 +21,52 @@ OUT_FRAME = OUT_RATE * 2 * FRAME_MS // 1000  # 10 ms = 480 bayt
 SILENCE = bytes(OUT_FRAME)
 PREBUFFER = OUT_RATE * 2 * PREBUFFER_MS // 1000
 
-END_TOOL = types.Tool(
-    function_declarations=[
-        types.FunctionDeclaration(
-            name="qongiroqni_tugat",
-            description="Suhbatdosh xayrlashganda yoki suhbat tugaganda qo'ng'iroqni yakunlaydi.",
-        )
-    ]
+# Ovozni avtomatik kuchaytirish (AGC): past ovozli telefon/mikrofon ham aniq eshitilsin
+AGC_TARGET = float(os.getenv("LIVE_AGC_TARGET", "3000"))  # gap ovozining maqsadli balandligi (RMS)
+AGC_MAX_GAIN = float(os.getenv("LIVE_AGC_MAX_GAIN", "6"))  # 0 yoki 1 = o'chiq
+AGC_NOISE = float(os.getenv("LIVE_AGC_NOISE", "120"))  # bundan past — shovqin, kuchaytirilmaydi
+
+END_DECL = types.FunctionDeclaration(
+    name="qongiroqni_tugat",
+    description="Suhbatdosh xayrlashganda yoki suhbat tugaganda qo'ng'iroqni yakunlaydi.",
 )
 
 
+class AGC:
+    """Gap ovozining o'rtacha balandligini kuzatib, past bo'lsa kuchaytiradi (shovqinni emas)."""
+
+    def __init__(self):
+        self.level = AGC_TARGET  # gap ovozining silliqlangan balandligi
+        self.gain = 1.0
+
+    def process(self, pcm: bytes) -> bytes:
+        if AGC_MAX_GAIN <= 1:
+            return pcm
+        a = array.array("h")
+        a.frombytes(pcm[: len(pcm) - len(pcm) % 2])
+        if not a:
+            return pcm
+        s = a[::4]
+        rms = (sum(x * x for x in s) / len(s)) ** 0.5
+        if rms <= AGC_NOISE:  # sukut/shovqin — kuchaytirmaymiz (aks holda shovqin "gap" bo'lib qoladi)
+            return pcm
+        self.level = 0.9 * self.level + 0.1 * rms
+        self.gain = max(1.0, min(AGC_MAX_GAIN, AGC_TARGET / max(self.level, 1.0)))
+        if self.gain <= 1.05:
+            return pcm
+        g = self.gain
+        for i, x in enumerate(a):
+            v = int(x * g)
+            a[i] = 32767 if v > 32767 else (-32768 if v < -32768 else v)
+        return a.tobytes()
+
+
 class LiveCall:
-    def __init__(self, calls, ai, peer_id: int, hangup: asyncio.Event):
+    def __init__(self, calls, ai, peer_id: int, hangup: asyncio.Event, extra_decls=None, on_tool=None):
+        """extra_decls — qo'ng'iroq paytida ishlatiladigan qo'shimcha funksiyalar, on_tool(name, args) -> str."""
+        self.extra_decls = list(extra_decls or [])
+        self.on_tool = on_tool
+        self.agc = AGC()
         self.calls = calls
         self.ai = ai
         self.peer_id = peer_id
@@ -58,7 +93,7 @@ class LiveCall:
             buf += await self.mic.get()
             if len(buf) >= IN_RATE * 2 // 10:
                 await session.send_realtime_input(
-                    audio=types.Blob(data=bytes(buf), mime_type=f"audio/pcm;rate={IN_RATE}")
+                    audio=types.Blob(data=self.agc.process(bytes(buf)), mime_type=f"audio/pcm;rate={IN_RATE}")
                 )
                 buf.clear()
 
@@ -105,15 +140,20 @@ class LiveCall:
         while True:
             async for msg in session.receive():
                 if msg.tool_call:
+                    responses = []
                     for fc in msg.tool_call.function_calls:
+                        result = "ok"
                         if fc.name == "qongiroqni_tugat":
                             self.finish_requested = True
-                    await session.send_tool_response(
-                        function_responses=[
-                            types.FunctionResponse(id=fc.id, name=fc.name, response={"natija": "ok"})
-                            for fc in msg.tool_call.function_calls
-                        ]
-                    )
+                        elif self.on_tool:
+                            try:
+                                result = await self.on_tool(fc.name, dict(fc.args or {}))
+                            except Exception as e:
+                                log.exception("Jonli funksiya xatosi: %s", fc.name)
+                                result = f"Xato: {e}"
+                        log.info("Jonli funksiya: %s %s -> %s", fc.name, dict(fc.args or {}), str(result)[:80])
+                        responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"natija": result}))
+                    await session.send_tool_response(function_responses=responses)
                 sc = msg.server_content
                 if not sc:
                     continue
@@ -151,14 +191,15 @@ class LiveCall:
             system_instruction=system,
             input_audio_transcription=types.AudioTranscriptionConfig(),
             output_audio_transcription=types.AudioTranscriptionConfig(),
-            tools=[END_TOOL],
+            tools=[types.Tool(function_declarations=[END_DECL] + self.extra_decls)],
             # Telefondagi shovqin gapni bo'lib qo'ymasin, odam gapini tugatishini kutsin
             realtime_input_config=types.RealtimeInputConfig(
                 automatic_activity_detection=types.AutomaticActivityDetection(
                     start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_LOW,
                     end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_LOW,
-                    prefix_padding_ms=200,
-                    silence_duration_ms=int(os.getenv("LIVE_SILENCE_MS", "800")),
+                    prefix_padding_ms=300,
+                    # Sekin gapiradiganlar (kattalar) gapi o'rtasida kesilib qolmasin
+                    silence_duration_ms=int(os.getenv("LIVE_SILENCE_MS", "1000")),
                 )
             ),
         )

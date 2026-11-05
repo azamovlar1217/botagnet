@@ -31,6 +31,15 @@ Buyruqlar: `/taklif onam`, `/bozor`, `/eslatmalar`, `/xotira`, `/oila`, `/yangi`
 **Muhim:** kompyuter o'chiq bo'lsa ham bot ishlashi uchun uni bepul serverga (Oracle Cloud Always Free) joylang:
 `bash deploy/deploy.sh <SERVER_IP>`.
 
+
+## v2.1
+- 🔑 **Bepul API kalitlari** (faqat siz): `/api_qosh AIza...` — boshqa Google akkauntdan olingan bepul Gemini kaliti.
+  Bittasining limiti tugasa, bot avtomatik keyingisiga o'tadi. Ro'yxat: `/api`, o'chirish: `/api_ochir 2`.
+  Kalit yozilgan xabar xavfsizlik uchun darhol o'chiriladi.
+- 👂 **Yaxshiroq eshitish**: qo'ng'iroqda past ovoz avtomatik kuchaytiriladi (shovqin emas), sekin gapirganda gap kesilmaydi.
+- 📋 **Qo'ng'iroq paytida topshiriq**: bot sizga qo'ng'iroq qilganda «onamga tel qilib, kechqurun boraman de» desangiz —
+  «xo'p» deydi, suhbat tugagach o'zi onangizga qo'ng'iroq qiladi va natijasini yuboradi.
+
 ## O'rnatish bosqichlari
 
 ### 1. Kerakli narsalarni oling

@@ -38,7 +38,7 @@ import live
 import storage
 import voice
 
-VERSION = "2.0"
+VERSION = "2.1"
 
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 # Windows: winget o'rnatgan ffmpeg PATH da bo'lishi uchun
@@ -94,6 +94,18 @@ dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 ai = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+
+
+def _build_pool() -> list:
+    """Asosiy kalit + egasi /api_qosh bilan qo'shgan bepul Gemini kalitlari."""
+    pool = [ai]
+    for key in storage.get("gemini_keys", []):
+        if key != os.environ["GEMINI_API_KEY"]:
+            pool.append(genai.Client(api_key=key))
+    return pool
+
+
+ai_pool: list = _build_pool()
 caller = None  # TelegramClient (faqat ENABLE_CALLS=1 bo'lsa)
 calls = None  # PyTgCalls
 
@@ -122,7 +134,7 @@ business_histories: dict[int, list] = {}
 family_histories: dict[int, list] = {}
 family_locks: dict[int, asyncio.Lock] = {}
 state = {"auto_reply": storage.get("auto_reply", True)}
-model_cooldown: dict[str, float] = {}  # 429 bo'lgan model -> qachongacha chetlab o'tiladi
+model_cooldown: dict[tuple, float] = {}  # (kalit, model) 429 bo'lsa -> qachongacha chetlab o'tiladi
 no_thinking_models: set[str] = set()  # thinking_level'ni qo'llamaydigan modellar
 
 # ---------------------------------------------------------------- Gemini AI
@@ -263,16 +275,17 @@ async def generate(history: list, config, models: list | None = None):
     """Asosiy model band bo'lsa (503/429), zaxira modelga o'tadi."""
     last_err = None
     for attempt in range(3):
-        order = models or FALLBACK_MODELS
+        order = [(k, m) for m in (models or FALLBACK_MODELS) for k in range(len(ai_pool))]
         now = asyncio.get_running_loop().time()
-        ready = [m for m in order if model_cooldown.get(m, 0) <= now]
-        for model in ready or order:  # band bo'lsa darhol keyingi modelga o'tadi
+        ready = [km for km in order if model_cooldown.get(km, 0) <= now]
+        for key_idx, model in ready or order:  # limit/band bo'lsa darhol keyingi kalit yoki modelga o'tadi
+            client = ai_pool[key_idx] if key_idx < len(ai_pool) else ai
             cfg = config
             if THINKING_LEVEL and model not in no_thinking_models and cfg.thinking_config is None:
                 cfg = cfg.model_copy(update={"thinking_config": types.ThinkingConfig(thinking_level=THINKING_LEVEL)})
             try:
                 return await asyncio.wait_for(
-                    ai.aio.models.generate_content(model=model, contents=history, config=cfg),
+                    client.aio.models.generate_content(model=model, contents=history, config=cfg),
                     timeout=AI_TIMEOUT,
                 )
             except asyncio.TimeoutError as e:
@@ -287,9 +300,9 @@ async def generate(history: list, config, models: list | None = None):
                     return await generate(history, config, [model] + [m for m in (models or FALLBACK_MODELS) if m != model])
                 if e.code not in (404, 429, 500, 503):
                     raise
-                if e.code == 429:  # limit tugagan: bu modelni bir daqiqa chetlab o'tamiz
-                    model_cooldown[model] = asyncio.get_running_loop().time() + 60
-                log.warning("%s band (%s), keyingi model...", model, e.code)
+                if e.code == 429:  # limit tugagan: shu kalit+modelni bir daqiqa chetlab o'tamiz
+                    model_cooldown[(key_idx, model)] = asyncio.get_running_loop().time() + 60
+                log.warning("%s (kalit #%d) band (%s), keyingisi...", model, key_idx + 1, e.code)
         await asyncio.sleep(3 * (attempt + 1))
     raise last_err
 
@@ -545,6 +558,10 @@ Suhbatdosh xayrlashsa yoki suhbat tugasa, iliq xayrlash, shundan keyin qongiroqn
 LIVE_SYSTEM = f"""Sen {OWNER_NAME}ning shaxsiy yordamchisisan: iliq, mehribon, quvnoq qiz.
 Hozir {OWNER_NAME}ning o'zi bilan TELEFONDA jonli gaplashyapsan. U bilan do'stona, samimiy suhbatlash,
 hol-ahvol so'ra, gapini qo'llab-quvvatla.
+TOPSHIRIQLAR: agar u suhbat davomida "onamga tel qilib ... de", "otamga ayt ...", "onamga yoz ..." kabi
+topshiriq bersa — DARHOL keyin_bajar funksiyasini chaqir (kimga, vazifa, turi), so'ng qisqa "Xo'p, suhbatimiz
+tugashi bilan qilaman" de va suhbatni davom ettir. Vazifani to'liq va aniq yoz: kimga, nima deyish, nima so'rash.
+Mavjud kontaktlar: {", ".join(k for k in CONTACTS if k != "men") or "yo'q"}. Kimga ekanligi noaniq bo'lsa, so'ra.
 {VOICE_RULES}
 {("U haqida: " + OWNER_ABOUT) if OWNER_ABOUT else ""}"""
 
@@ -566,7 +583,21 @@ Qanday gaplashish kerak:
 {VOICE_RULES}"""
 
 
-async def live_call(who: str, system: str, opening: str):
+DEFER_DECL = types.FunctionDeclaration(
+    name="keyin_bajar",
+    description="Egasi qo'ng'iroq paytida bergan topshiriqni yozib qo'yadi: suhbat tugagach bajariladi.",
+    parameters=_schema(
+        {
+            "kimga": ("STRING", "Kontakt nomi (onam, otam...) yoki @username / +998... raqam"),
+            "vazifa": ("STRING", "Nima deyish/so'rash kerak — to'liq va aniq"),
+            "turi": ("STRING", "qongiroq (ovozli qo'ng'iroq, odatiy) yoki xabar (Telegram matn)"),
+        },
+        ["kimga", "vazifa"],
+    ),
+)
+
+
+async def live_call(who: str, system: str, opening: str, extra_decls=None, on_tool=None):
     """Gemini Live orqali real vaqtdagi telefon suhbati. Suhbat matnini qaytaradi."""
     from ntgcalls import TelegramServerError
 
@@ -574,7 +605,7 @@ async def live_call(who: str, system: str, opening: str):
     async with call_lock:
         for attempt in range(2):  # Telegram server xatosida bir marta qayta urinadi
             peer_id, st = await open_call(who, live=True)
-            st.live_obj = live.LiveCall(calls, ai, peer_id, st.hangup)
+            st.live_obj = live.LiveCall(calls, ai, peer_id, st.hangup, extra_decls, on_tool)
             try:
                 return await st.live_obj.run(system, opening, LIVE_MAX_SECONDS)
             except TelegramServerError:
@@ -588,14 +619,46 @@ async def live_call(who: str, system: str, opening: str):
 
 
 async def live_call_and_report(who: str, text: str):
+    deferred: list[dict] = []  # egasi qo'ng'iroq paytida bergan topshiriqlar
+
+    async def on_tool(name: str, args: dict) -> str:
+        if name != "keyin_bajar":
+            return "Noma'lum funksiya."
+        target = str(args.get("kimga", "")).strip().lower()
+        if target not in CONTACTS and not DIRECT_TARGET.match(target):
+            return f"'{target}' kontaktlarda yo'q. Mavjud: {', '.join(k for k in CONTACTS if k != 'men')}. Qaytadan so'ra."
+        deferred.append({"kimga": target, "vazifa": str(args.get("vazifa", "")),
+                         "turi": str(args.get("turi") or "qongiroq").lower()})
+        return "Yozib qo'yildi. Suhbat tugagach bajariladi."
+
+    await _live_call_and_report(who, text, on_tool)
+    if deferred:  # qo'ng'iroq tugadi (yoki uzildi) — topshiriqlarni bajaramiz
+        await run_deferred(deferred)
+
+
+async def run_deferred(tasks: list[dict]):
+    """Qo'ng'iroq paytida berilgan topshiriqlarni navbat bilan bajaradi."""
+    for t in tasks:
+        who, task = t["kimga"], t["vazifa"]
+        if t["turi"].startswith("xabar"):
+            res = await run_tool("xabar_yubor", {"kimga": who, "matn": task})
+            await bot.send_message(OWNER_ID, f"✉️ Topshiriq bajarildi — {who}: {res}")
+        else:
+            await bot.send_message(OWNER_ID, f"📞 Topshiriq: {who} ga qo'ng'iroq qilinmoqda…\n«{task}»")
+            await live_call_and_report(who, task)
+
+
+async def _live_call_and_report(who: str, text: str, on_tool):
     try:
+        extra = None
         if who == "men":
             first = text or f"Alo, {OWNER_NAME}! Eshitaman, gapiravering."
             system, opening = LIVE_SYSTEM, f"Shu gap bilan boshla: {first}"
+            extra = [DEFER_DECL]
         else:
             system = contact_system(who, text)
             opening = "salom berib, o'zingni tanishtir va qo'ng'iroq maqsadini yetkaz"
-        transcript = await live_call(who, system, opening)
+        transcript = await live_call(who, system, opening, extra, on_tool)
         name = "Siz" if who == "men" else who.capitalize()
         lines = [f"{name if w == 'Siz' else w}: {t}" for w, t in transcript if t]
         if who != "men":
@@ -840,6 +903,7 @@ async def cmd_start(m: Message):
         "/eslatmalar — kutilayotgan eslatmalar\n"
         "/xotira — men eslab qolgan narsalar\n"
         "/oila — ulangan oila a'zolari\n"
+        "/api — bepul AI kalitlarini qo'shish (limit tugamasligi uchun)\n"
         "/yangi — suhbatni yangidan boshlash\n"
         "/avto — avto-javobni yoqish/o'chirish\n"
         "/kontaktlar — kontaktlar ro'yxati"
@@ -908,6 +972,65 @@ async def cmd_reminders(m: Message):
 async def cmd_memory(m: Message):
     mem = storage.memories()
     await send_long(m.chat.id, "\n".join(f"• {t}" for t in mem) or "Xotira bo'sh. «Eslab qol: ...» deb yozing.")
+
+
+def _mask(key: str) -> str:
+    return key[:6] + "…" + key[-4:]
+
+
+@router.message(Command("api"), is_owner)
+async def cmd_api(m: Message):
+    keys = storage.get("gemini_keys", [])
+    lines = [f"1. {_mask(os.environ['GEMINI_API_KEY'])} (asosiy, .env)"]
+    lines += [f"{i}. {_mask(k)}" for i, k in enumerate(keys, start=2)]
+    await m.answer(
+        "🔑 Gemini kalitlari (bittasining bepul limiti tugasa, keyingisiga o'tadi):\n"
+        + "\n".join(lines)
+        + "\n\nQo'shish: /api_qosh AIza...\n"
+        "O'chirish: /api_ochir 2\n\n"
+        "Yangi bepul kalit: boshqa Google akkaunt bilan https://aistudio.google.com/apikey → Create API key.\n"
+        "Har bir Google akkauntning limiti alohida, shuning uchun 2-3 ta kalit ancha ko'p javob beradi."
+    )
+
+
+@router.message(Command("api_qosh"), is_owner)
+async def cmd_api_add(m: Message, command: CommandObject):
+    key = (command.args or "").strip()
+    with contextlib.suppress(Exception):
+        await m.delete()  # kalit chatda ochiq turmasin
+    if not re.fullmatch(r"AIza[0-9A-Za-z_\-]{30,}", key):
+        await m.answer("Kalit noto'g'ri ko'rinishda. U «AIza...» bilan boshlanadi. Masalan: /api_qosh AIzaSy...")
+        return
+    keys = storage.get("gemini_keys", [])
+    if key in keys or key == os.environ["GEMINI_API_KEY"]:
+        await m.answer("Bu kalit allaqachon bor.")
+        return
+    try:
+        client = genai.Client(api_key=key)
+        await asyncio.wait_for(client.aio.models.get(model="gemini-flash-lite-latest"), timeout=20)
+    except Exception as e:
+        detail = f" ({e.code}: {e.message})" if isinstance(e, genai.errors.APIError) else ""
+        await m.answer(f"❌ Kalit ishlamadi — noto'g'ri, o'chirilgan yoki internet muammosi{detail}.")
+        return
+    keys.append(key)
+    storage.put("gemini_keys", keys)
+    ai_pool.append(client)
+    await m.answer(f"✅ Kalit qo'shildi va tekshirildi: {_mask(key)}\nJami kalitlar: {len(ai_pool)}. "
+                   "Xavfsizlik uchun xabaringizni o'chirdim.")
+
+
+@router.message(Command("api_ochir"), is_owner)
+async def cmd_api_del(m: Message, command: CommandObject):
+    keys = storage.get("gemini_keys", [])
+    arg = (command.args or "").strip()
+    if not arg.isdigit() or not 2 <= int(arg) <= len(keys) + 1:
+        await m.answer("Raqamni yozing, masalan: /api_ochir 2 (1-asosiy kalitni .env orqali o'zgartiriladi). Ro'yxat: /api")
+        return
+    removed = keys.pop(int(arg) - 2)
+    storage.put("gemini_keys", keys)
+    ai_pool[:] = _build_pool()
+    model_cooldown.clear()  # indekslar o'zgardi
+    await m.answer(f"🗑 O'chirildi: {_mask(removed)}. Jami kalitlar: {len(ai_pool)}.")
 
 
 # ---------------------------------------------------------------- egasi: xabarlar
