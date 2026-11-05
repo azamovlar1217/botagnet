@@ -10,6 +10,27 @@
 Telegram botlari qo'ng'iroq qila olmaydi. Shuning uchun qo'ng'iroqni **alohida Telegram akkaunt** (qo'ng'iroqchi) qiladi.
 Buning uchun ikkinchi SIM-karta bilan yangi Telegram akkaunt oching. Asosiy akkauntingizni ishlatmang.
 
+
+## v2 — yangi imkoniyatlar
+- 🛒 **Onam uchun bozor yordamchisi.** Botga `/taklif onam` yozing, chiqqan havolani onangizga yuboring. Onangiz bosgach:
+  - uyga kerakli narsalar ro'yxatini birga tuzadi;
+  - qancha pul borligini va necha kunga yetishi kerakligini so'raydi;
+  - shu pulga **7 kunlik o'zbek milliy taomlari menyusi** va bozor ro'yxatini (miqdor, taxminiy narx) tuzadi;
+  - bozorda mahsulot **rasmini** yuborsa — yaxshi-yomonligini va taxminiy narxini aytadi;
+  - «go'shtni 110 mingga oldim» desa — yozib, qolgan pulni aytadi;
+  - menyu, ro'yxat va budjet sizga ham keladi; har yakshanba ertalab onangizga eslatma yuboradi;
+  - ovozli xabarga ovoz bilan javob beradi.
+- ⏰ **Eslatmalar**: «ertaga 9 da dorini eslat».
+- 🧠 **Doimiy xotira**: «eslab qol: ...». Suhbat va ma'lumotlar `agent.db` da saqlanadi — qayta ishga tushganda yo'qolmaydi.
+- 🌤 **Ob-havo**, 💵 **valyuta kursi** (bepul, kalitsiz), ☀️ ertalabki xulosa (`MORNING_BRIEF`).
+- 🖼 **Rasm tahlili**: botga rasm yuboring.
+- ⚡ Tezroq javob (`THINKING_LEVEL=low`), uzun javoblar bo'lib yuboriladi, Markdown qoldiqlari tozalanadi.
+
+Buyruqlar: `/taklif onam`, `/bozor`, `/eslatmalar`, `/xotira`, `/oila`, `/yangi`, `/avto`, `/kontaktlar`.
+
+**Muhim:** kompyuter o'chiq bo'lsa ham bot ishlashi uchun uni bepul serverga (Oracle Cloud Always Free) joylang:
+`bash deploy/deploy.sh <SERVER_IP>`.
+
 ## O'rnatish bosqichlari
 
 ### 1. Kerakli narsalarni oling

@@ -10,3 +10,4 @@ venv/
 __pycache__/
 *.log
 *.bak*
+*.db
